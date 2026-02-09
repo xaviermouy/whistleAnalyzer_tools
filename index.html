@@ -175,7 +175,19 @@
     </div>
 
     <div class="container">
-        <h2>2. Convert</h2>
+        <h2>2. Parameters</h2>
+        <div style="margin-bottom: 10px;">
+            <label for="startTimeOffsetInput">Start time offset (seconds):</label>
+            <input type="number" id="startTimeOffsetInput" value="0" step="0.1" style="width: 100px; padding: 6px 10px; font-size: 16px; border: 1px solid #ccc; border-radius: 4px; margin-left: 10px;">
+        </div>
+        <div>
+            <label for="durationInput">Duration of each selection box (seconds):</label>
+            <input type="number" id="durationInput" value="1.0" min="0.01" step="0.1" style="width: 100px; padding: 6px 10px; font-size: 16px; border: 1px solid #ccc; border-radius: 4px; margin-left: 10px;">
+        </div>
+    </div>
+
+    <div class="container">
+        <h2>3. Convert</h2>
         <button class="btn btn-success" onclick="convertFiles()" id="convertBtn" disabled>
             Convert to Raven Format
         </button>
@@ -207,7 +219,7 @@ import csv
 import io
 from collections import defaultdict
 
-def write_raven_file(rows, filename):
+def write_raven_file(rows, filename, start_time_offset=0, duration=1.0):
     """
     Create Raven selection table content for a single audio file.
     """
@@ -228,8 +240,8 @@ def write_raven_file(rows, filename):
     output.write('\\t'.join(header) + '\\n')
 
     for i, row in enumerate(rows, start=1):
-        begin_time = float(row['time_offset'])
-        end_time = begin_time + 1.0
+        begin_time = float(row['time_offset'])+start_time_offset
+        end_time = begin_time + duration
 
         raven_row = [
             str(i),
@@ -248,7 +260,7 @@ def write_raven_file(rows, filename):
     return output.getvalue()
 
 
-def csv_to_raven(csv_content, csv_filename):
+def csv_to_raven(csv_content, csv_filename, start_time_offset=0, duration=1.0):
     """
     Convert CSV content to multiple Raven selection table files.
     Returns a list of (output_filename, content) tuples.
@@ -275,7 +287,7 @@ def csv_to_raven(csv_content, csv_filename):
     results = []
     for filename, rows in rows_by_file.items():
         output_name = f"{prefix}{filename}.Table1.selection.txt"
-        content = write_raven_file(rows, filename)
+        content = write_raven_file(rows, filename, start_time_offset, duration)
         results.append((output_name, content, len(rows)))
 
     return results
@@ -335,11 +347,15 @@ def csv_to_raven(csv_content, csv_filename):
                     const content = await file.text();
 
                     // Pass to Python
+                    const startTimeOffset = parseFloat(document.getElementById('startTimeOffsetInput').value) || 0;
+                    const duration = parseFloat(document.getElementById('durationInput').value) || 1.0;
                     pyodide.globals.set('csv_content', content);
                     pyodide.globals.set('csv_filename', file.name);
+                    pyodide.globals.set('start_time_offset', startTimeOffset);
+                    pyodide.globals.set('duration', duration);
 
                     const results = await pyodide.runPythonAsync(`
-csv_to_raven(csv_content, csv_filename)
+csv_to_raven(csv_content, csv_filename, start_time_offset, duration)
                     `);
 
                     // Process results
