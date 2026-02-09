@@ -14,6 +14,7 @@ The HTML file can also be [downloaded](index.html) and used offline - just open 
 
 - Converts CSV files to Raven Pro selection table format
 - Creates one Raven file per unique audio file found in the CSV
+- Configurable start time offset and selection duration
 - Works entirely in the browser (no server needed)
 - Can be used offline after first load
 
@@ -24,8 +25,8 @@ The converter maps CSV fields to Raven columns as follows:
 | CSV Field | Raven Column |
 |-----------|--------------|
 | `filename` | `Begin File` |
-| `time_offset` | `Begin Time (s)` |
-| `time_offset + 1` | `End Time (s)` |
+| `time_offset + start_time_offset` | `Begin Time (s)` |
+| `Begin Time + duration` | `End Time (s)` |
 | `confidence` | `confidence` |
 
 Fixed values:
@@ -45,13 +46,28 @@ For batch processing, use the Python script directly:
 ### Usage
 
 ```bash
-python csv_to_raven.py <input_folder>
+python csv_to_raven.py <input_folder> [--start_time_offset SECONDS] [--duration SECONDS]
 ```
 
-### Example
+### Options
+
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `input_folder` | Path to folder containing CSV files to convert | *(required)* |
+| `--start_time_offset` | Time offset in seconds added to the start time of each detection | `0` |
+| `--duration` | Duration in seconds for each selection box | `1.0` |
+
+### Examples
 
 ```bash
+# Basic usage with defaults
 python csv_to_raven.py ./output
+
+# Custom duration of 2 seconds per selection
+python csv_to_raven.py ./output --duration 2.0
+
+# Shift start times by 0.5 seconds and use 1.5 second selections
+python csv_to_raven.py ./output --start_time_offset 0.5 --duration 1.5
 ```
 
 This will convert all CSV files in the `./output` folder and create Raven selection table files in the same folder.
