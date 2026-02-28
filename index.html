@@ -180,9 +180,25 @@
             <label for="startTimeOffsetInput">Start time offset (seconds):</label>
             <input type="number" id="startTimeOffsetInput" value="0" step="0.1" style="width: 100px; padding: 6px 10px; font-size: 16px; border: 1px solid #ccc; border-radius: 4px; margin-left: 10px;">
         </div>
-        <div>
+        <div style="margin-bottom: 10px;">
             <label for="durationInput">Duration of each selection box (seconds):</label>
             <input type="number" id="durationInput" value="1.0" min="0.01" step="0.1" style="width: 100px; padding: 6px 10px; font-size: 16px; border: 1px solid #ccc; border-radius: 4px; margin-left: 10px;">
+        </div>
+        <div style="margin-bottom: 10px;">
+            <label for="firstSecondsToIgnoreInput">Ignore first N seconds of each recording:</label>
+            <input type="number" id="firstSecondsToIgnoreInput" value="0" min="0" step="1" style="width: 100px; padding: 6px 10px; font-size: 16px; border: 1px solid #ccc; border-radius: 4px; margin-left: 10px;">
+        </div>
+        <div style="margin-bottom: 10px;">
+            <label for="mergeOverlappedDetectionsInput">Merge overlapping detections:</label>
+            <input type="checkbox" id="mergeOverlappedDetectionsInput" style="width: 20px; height: 20px; margin-left: 10px; vertical-align: middle;">
+        </div>
+        <div>
+            <label for="mergeConfidenceOperationInput">Confidence of merged detections:</label>
+            <select id="mergeConfidenceOperationInput" style="padding: 6px 10px; font-size: 16px; border: 1px solid #ccc; border-radius: 4px; margin-left: 10px;">
+                <option value="mean">Mean</option>
+                <option value="max">Max</option>
+                <option value="median">Median</option>
+            </select>
         </div>
     </div>
 
@@ -214,84 +230,161 @@
                 pyodide = await loadPyodide();
 
                 // Load the Python conversion code
+                // PYTHON_START
                 await pyodide.runPythonAsync(`
-import csv
-import io
-from collections import defaultdict
+                import csv
+                import io
+                import statistics
+                from collections import defaultdict
 
-def write_raven_file(rows, filename, start_time_offset=0, duration=1.0):
-    """
-    Create Raven selection table content for a single audio file.
-    """
-    header = [
-        "Selection",
-        "View",
-        "Channel",
-        "Begin Time (s)",
-        "End Time (s)",
-        "Low Freq (Hz)",
-        "High Freq (Hz)",
-        "Begin File",
-        "confidence",
-        "Sound type"
-    ]
+                RAVEN_HEADER = [
+                    "Selection",
+                    "View",
+                    "Channel",
+                    "Begin Time (s)",
+                    "End Time (s)",
+                    "Low Freq (Hz)",
+                    "High Freq (Hz)",
+                    "Begin File",
+                    "Confidence",
+                    "TP",
+                    "FP",
+                    "FN",
+                    "Comments",
+                ]
 
-    output = io.StringIO()
-    output.write('\\t'.join(header) + '\\n')
+                def _build_raven_rows(rows, duration, start_time_offset, first_seconds_to_ignore,
+                                      merge_overlapped_detections, merge_confidence_operation):
+                    """
+                    Apply all filters and transforms to a list of detection rows.
 
-    for i, row in enumerate(rows, start=1):
-        begin_time = float(row['time_offset'])+start_time_offset
-        end_time = begin_time + duration
+                    This is the core processing function shared between the CLI script and the
+                    browser-based tool (index.html). It performs no file I/O.
 
-        raven_row = [
-            str(i),
-            "Spectrogram 1",
-            "1",
-            f"{begin_time:.6f}",
-            f"{end_time:.6f}",
-            "0",
-            "22000",
-            filename,
-            row['confidence'],
-            "Dolphin_whistles"
-        ]
-        output.write('\\t'.join(raven_row) + '\\n')
+                    Steps (in order):
+                        1. Drop rows whose time_offset < first_seconds_to_ignore.
+                        2. Compute begin_time = time_offset + start_time_offset and
+                           end_time = begin_time + duration for each row.
+                        3. Optionally merge consecutive overlapping detections.
 
-    return output.getvalue()
+                    Args:
+                        rows (list[dict]): Detection rows; each must have 'time_offset' and 'confidence'.
+                        duration (float): Duration (s) of each detection box.
+                        start_time_offset (float): Offset (s) added to every time_offset.
+                        first_seconds_to_ignore (float): Drop detections with time_offset below this value.
+                        merge_overlapped_detections (bool): Merge temporally overlapping detections.
+                        merge_confidence_operation (str): 'mean', 'max', or 'median'.
 
+                    Returns:
+                        list[dict]: Processed rows, each with 'begin_time' and 'end_time' added.
+                    """
+                    # Step 1: drop detections in the ignored leading window
+                    if first_seconds_to_ignore > 0:
+                        rows = [row for row in rows if float(row['time_offset']) >= first_seconds_to_ignore]
 
-def csv_to_raven(csv_content, csv_filename, start_time_offset=0, duration=1.0):
-    """
-    Convert CSV content to multiple Raven selection table files.
-    Returns a list of (output_filename, content) tuples.
-    """
-    # Determine prefix from CSV filename
-    if csv_filename.startswith("whistle_detections_"):
-        prefix = "whistle_detections_"
-    elif csv_filename.startswith("whistle_all_"):
-        prefix = "whistle_all_"
-    else:
-        prefix = csv_filename.rsplit('.', 1)[0] + "_"
+                    # Step 2: compute begin/end times
+                    for row in rows:
+                        row['begin_time'] = float(row['time_offset']) + start_time_offset
+                        row['end_time'] = row['begin_time'] + duration
 
-    # Read and group by filename
-    rows_by_file = defaultdict(list)
-    reader = csv.DictReader(io.StringIO(csv_content))
-    for row in reader:
-        filename = row['filename']
-        rows_by_file[filename].append(row)
+                    # Step 3: merge overlapping detections
+                    if merge_overlapped_detections and rows:
+                        def merge_confidence(group):
+                            values = [float(r['confidence']) for r in group]
+                            if merge_confidence_operation == 'max':
+                                return str(max(values))
+                            elif merge_confidence_operation == 'median':
+                                return str(statistics.median(values))
+                            else:  # default: mean
+                                return str(sum(values) / len(values))
 
-    if not rows_by_file:
-        return []
+                        rows = sorted(rows, key=lambda r: r['begin_time'])
+                        merged = []
+                        group = [rows[0]]
+                        for row in rows[1:]:
+                            if row['begin_time'] <= group[-1]['end_time']:
+                                group.append(row)
+                            else:
+                                merged_row = dict(group[0])
+                                merged_row['begin_time'] = group[0]['begin_time']
+                                merged_row['end_time'] = max(r['end_time'] for r in group)
+                                merged_row['confidence'] = merge_confidence(group)
+                                merged.append(merged_row)
+                                group = [row]
+                        # Flush last group
+                        merged_row = dict(group[0])
+                        merged_row['begin_time'] = group[0]['begin_time']
+                        merged_row['end_time'] = max(r['end_time'] for r in group)
+                        merged_row['confidence'] = merge_confidence(group)
+                        merged.append(merged_row)
+                        rows = merged
 
-    # Create output files
-    results = []
-    for filename, rows in rows_by_file.items():
-        output_name = f"{prefix}{filename}.Table1.selection.txt"
-        content = write_raven_file(rows, filename, start_time_offset, duration)
-        results.append((output_name, content, len(rows)))
+                    return rows
 
-    return results
+                def csv_to_raven_browser(csv_content, csv_filename, duration, start_time_offset,
+                                          first_seconds_to_ignore, merge_overlapped_detections,
+                                          merge_confidence_operation):
+                    """Convert CSV content to Raven selection table strings (browser version).
+
+                    Browser-adapted version of csv_to_raven(): accepts CSV as a string and returns
+                    a list of (output_filename, content, num_selections) tuples instead of writing
+                    to disk.
+
+                    Args:
+                        csv_content: CSV file content as a string.
+                        csv_filename: Original CSV filename (used to determine the output prefix).
+                        duration: Duration in seconds of each detection box.
+                        start_time_offset: Offset (s) added to every detection's time_offset.
+                        first_seconds_to_ignore: Drop detections with time_offset below this value.
+                        merge_overlapped_detections: If True, merge overlapping detections.
+                        merge_confidence_operation: 'mean', 'max', or 'median'.
+
+                    Returns:
+                        List of (output_filename, content_string, num_selections) tuples.
+                    """
+                    if csv_filename.startswith("whistle_detections_"):
+                        prefix = "whistle_detections_"
+                    elif csv_filename.startswith("whistle_all_"):
+                        prefix = "whistle_all_"
+                    else:
+                        prefix = csv_filename.rsplit('.', 1)[0] + "_"
+
+                    rows_by_file = defaultdict(list)
+                    reader = csv.DictReader(io.StringIO(csv_content))
+                    for row in reader:
+                        rows_by_file[row['filename']].append(row)
+
+                    if not rows_by_file:
+                        return []
+
+                    results = []
+                    for audio_filename, rows in rows_by_file.items():
+                        rows = _build_raven_rows(rows, duration, start_time_offset,
+                                                  first_seconds_to_ignore,
+                                                  merge_overlapped_detections,
+                                                  merge_confidence_operation)
+                        output = io.StringIO()
+                        output.write('\\t'.join(RAVEN_HEADER) + '\\n')
+                        for i, row in enumerate(rows, start=1):
+                            raven_row = [
+                                str(i),
+                                "Spectrogram 1",
+                                "1",
+                                f"{row['begin_time']:.6f}",
+                                f"{row['end_time']:.6f}",
+                                "0",
+                                "22000",
+                                audio_filename,
+                                row['confidence'],
+                                "", "", "", ""
+                            ]
+                            output.write('\\t'.join(raven_row) + '\\n')
+                        output_name = f"{prefix}{audio_filename}.Table1.selection.txt"
+                        results.append((output_name, output.getvalue(), len(rows)))
+
+                    return results
                 `);
+                // PYTHON_END
 
                 status.className = 'success';
                 status.textContent = 'Python environment ready!';
@@ -349,13 +442,19 @@ def csv_to_raven(csv_content, csv_filename, start_time_offset=0, duration=1.0):
                     // Pass to Python
                     const startTimeOffset = parseFloat(document.getElementById('startTimeOffsetInput').value) || 0;
                     const duration = parseFloat(document.getElementById('durationInput').value) || 1.0;
+                    const firstSecondsToIgnore = parseFloat(document.getElementById('firstSecondsToIgnoreInput').value) || 0;
+                    const mergeOverlappedDetections = document.getElementById('mergeOverlappedDetectionsInput').checked;
+                    const mergeConfidenceOperation = document.getElementById('mergeConfidenceOperationInput').value;
                     pyodide.globals.set('csv_content', content);
                     pyodide.globals.set('csv_filename', file.name);
-                    pyodide.globals.set('start_time_offset', startTimeOffset);
                     pyodide.globals.set('duration', duration);
+                    pyodide.globals.set('start_time_offset', startTimeOffset);
+                    pyodide.globals.set('first_seconds_to_ignore', firstSecondsToIgnore);
+                    pyodide.globals.set('merge_overlapped_detections', mergeOverlappedDetections);
+                    pyodide.globals.set('merge_confidence_operation', mergeConfidenceOperation);
 
                     const results = await pyodide.runPythonAsync(`
-csv_to_raven(csv_content, csv_filename, start_time_offset, duration)
+csv_to_raven_browser(csv_content, csv_filename, duration, start_time_offset, first_seconds_to_ignore, merge_overlapped_detections, merge_confidence_operation)
                     `);
 
                     // Process results
